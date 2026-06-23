@@ -287,6 +287,38 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     )
 
 
+async def _enrich_with_ai(signals: List[TradingSignal]) -> None:
+    """Attach Gemini reasoning/confidence to the top actionable signals.
+
+    Best-effort: skipped entirely if GEMINI_API_KEY isn't set, and any
+    per-signal failure (timeout, rate limit, etc.) is swallowed so the
+    quant pipeline never blocks or breaks on an AI hiccup.
+    """
+    from backend.ai.gemini import get_gemini_client
+
+    gemini = get_gemini_client()
+    if not gemini or not signals:
+        return
+
+    for signal in signals[:3]:
+        try:
+            analysis = await gemini.analyze_signal({
+                "market_title": signal.market.slug,
+                "platform": "polymarket",
+                "category": "crypto",
+                "model_probability": signal.model_probability,
+                "market_probability": signal.market_probability,
+                "edge": signal.edge,
+                "suggested_size": signal.suggested_size,
+                "direction": signal.direction,
+            })
+            if analysis.confidence > 0:
+                signal.reasoning += f" | AI: {analysis.reasoning}"
+                signal.confidence = (signal.confidence + analysis.confidence) / 2
+        except Exception as e:
+            logger.debug(f"Gemini enrichment skipped for {signal.market.slug}: {e}")
+
+
 async def scan_for_signals() -> List[TradingSignal]:
     """
     Scan BTC 5-min markets and generate signals.
@@ -326,6 +358,8 @@ async def scan_for_signals() -> List[TradingSignal]:
     for signal in actionable[:5]:
         logger.info(f"  {signal.market.slug}")
         logger.info(f"    Edge: {signal.edge:+.1%} -> {signal.direction.upper()} @ ${signal.suggested_size:.2f}")
+
+    await _enrich_with_ai(actionable)
 
     # Persist signals with non-zero edge to DB for calibration tracking
     _persist_signals(signals)

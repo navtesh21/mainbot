@@ -20,9 +20,12 @@ class Settings(BaseSettings):
 
     # AI API Keys
     GROQ_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
 
     # AI Model Configuration
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # AI Feature Flags
     AI_LOG_ALL_CALLS: bool = True

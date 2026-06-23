@@ -125,12 +125,23 @@ async def fetch_kalshi_weather_markets(
                     if parsed["target_date"] < today:
                         continue
 
-                    yes_price = (m.get("yes_ask") or 0) / 100.0
-                    no_price = (m.get("no_ask") or 0) / 100.0
+                    yes_ask = m.get("yes_ask")
+                    no_ask = m.get("no_ask")
+                    last_price = m.get("last_price")
 
-                    # Fallback to last/mid prices
+                    # Skip markets with no real quote at all — don't fabricate a 50/50 price
+                    if not yes_ask and not no_ask and not last_price:
+                        continue
+
+                    yes_price = (yes_ask or 0) / 100.0
+                    no_price = (no_ask or 0) / 100.0
+
+                    # Derive the missing side from whichever real quote is available
                     if yes_price <= 0:
-                        yes_price = (m.get("last_price") or 50) / 100.0
+                        if no_price > 0:
+                            yes_price = 1.0 - no_price
+                        elif last_price:
+                            yes_price = last_price / 100.0
                     if no_price <= 0:
                         no_price = 1.0 - yes_price
 

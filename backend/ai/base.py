@@ -10,6 +10,7 @@ class AIProvider(str, Enum):
     """Supported AI providers."""
     CLAUDE = "claude"
     GROQ = "groq"
+    GEMINI = "gemini"
 
 
 @dataclass

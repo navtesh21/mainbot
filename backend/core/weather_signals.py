@@ -142,6 +142,46 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     )
 
 
+async def _enrich_with_ai(signals: List[WeatherTradingSignal]) -> None:
+    """Attach Gemini reasoning/confidence to the top actionable weather signals.
+
+    Best-effort: skipped entirely if GEMINI_API_KEY isn't set, and any
+    per-signal failure is swallowed so the ensemble pipeline never blocks.
+    """
+    from backend.ai.gemini import get_gemini_client
+
+    gemini = get_gemini_client()
+    if not gemini or not signals:
+        return
+
+    for signal in signals[:3]:
+        try:
+            analysis = await gemini.analyze_signal(
+                {
+                    "market_title": signal.market.title,
+                    "platform": signal.market.platform,
+                    "category": "weather",
+                    "model_probability": signal.model_probability,
+                    "market_probability": signal.market_probability,
+                    "edge": signal.edge,
+                    "suggested_size": signal.suggested_size,
+                    "direction": signal.direction,
+                },
+                context={
+                    "weather_data": {
+                        "high_temp": signal.ensemble_mean,
+                        "confidence": signal.confidence,
+                        "ensemble_count": signal.ensemble_members,
+                    }
+                },
+            )
+            if analysis.confidence > 0:
+                signal.reasoning += f" | AI: {analysis.reasoning}"
+                signal.confidence = (signal.confidence + analysis.confidence) / 2
+        except Exception as e:
+            logger.debug(f"Gemini enrichment skipped for {signal.market.title}: {e}")
+
+
 async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
     """
     Scan weather markets and generate ensemble-based signals.
@@ -194,6 +234,8 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
     for signal in actionable[:5]:
         logger.info(f"  {signal.market.city_name}: {signal.market.metric} {signal.market.direction} "
                      f"{signal.market.threshold_f:.0f}F | Edge: {signal.edge:+.1%}")
+
+    await _enrich_with_ai(actionable)
 
     # Persist signals to DB
     _persist_weather_signals(signals)

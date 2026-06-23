@@ -44,6 +44,8 @@ class AICallLogger:
         "llama-3.1-70b-versatile": {"input": 0.59, "output": 0.79},
         "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
         "mixtral-8x7b-32768": {"input": 0.24, "output": 0.24},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
     }
 
     def __init__(self, log_dir: str = "logs/ai", log_to_db: bool = True):

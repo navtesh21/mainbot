@@ -2,6 +2,7 @@
 from .base import AIAnalysis, AIProvider
 from .claude import ClaudeAnalyzer
 from .groq import GroqClassifier
+from .gemini import GeminiAnalyzer
 from .logger import AICallLogger
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     'AIProvider',
     'ClaudeAnalyzer',
     'GroqClassifier',
+    'GeminiAnalyzer',
     'AICallLogger'
 ]

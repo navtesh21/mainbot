@@ -255,7 +255,7 @@ async def weather_scan_and_trade_job():
 
                 trade = Trade(
                     market_ticker=signal.market.market_id,
-                    platform="polymarket",
+                    platform=signal.market.platform,
                     event_slug=signal.market.slug,
                     market_type="weather",
                     direction=signal.direction,

@@ -11,7 +11,7 @@ import os
 from backend.config import settings
 from backend.models.database import (
     get_db, init_db, SessionLocal,
-    Signal, Trade, BotState, AILog, ScanLog
+    Signal, Trade, BotState, AILog, ScanLog, FootballSession
 )
 from backend.core.signals import scan_for_signals, TradingSignal
 from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
@@ -82,6 +82,30 @@ class BtcWindowResponse(BaseModel):
     spread: float
 
 
+class CryptoMarketResponse(BaseModel):
+    slug: str
+    market_id: str
+    window_minutes: int
+    up_price: float
+    down_price: float
+    window_end: datetime
+    volume: float
+    time_until_end: float
+    signal_direction: Optional[str] = None
+    signal_edge: Optional[float] = None
+    signal_confidence: Optional[float] = None
+
+
+class CryptoStatusResponse(BaseModel):
+    enabled: bool
+    running: bool
+    trading_live: bool
+    open_positions: list
+    today_pnl: float
+    total_trades: int
+    risk: dict
+
+
 class MicrostructureResponse(BaseModel):
     rsi: float = 50.0
     momentum_1m: float = 0.0
@@ -126,6 +150,7 @@ class TradeResponse(BaseModel):
     settled: bool
     result: str
     pnl: Optional[float]
+    exit_reason: Optional[str] = None
 
 
 class BotStats(BaseModel):
@@ -154,52 +179,113 @@ class CalibrationSummary(BaseModel):
     brier_score: float
 
 
-class WeatherForecastResponse(BaseModel):
-    city_key: str
-    city_name: str
-    target_date: str
-    mean_high: float
-    std_high: float
-    mean_low: float
-    std_low: float
-    num_members: int
-    ensemble_agreement: float
+class FootballFixtureResponse(BaseModel):
+    home_team: str
+    away_team: str
+    utc_kickoff: str
+    status: str
+    matchday: int = 0
+    source_id: int = 0
 
 
-class WeatherMarketResponse(BaseModel):
-    slug: str
-    market_id: str
-    platform: str = "polymarket"
-    title: str
-    city_key: str
-    city_name: str
-    target_date: str
-    threshold_f: float
-    metric: str
-    direction: str
-    yes_price: float
-    no_price: float
-    volume: float
+class FootballLiveMatchResponse(BaseModel):
+    fixture_id: int
+    home_team: str
+    away_team: str
+    status: str
+    minute: int
+    home_score: int
+    away_score: int
+    date: str = ""
 
 
-class WeatherSignalResponse(BaseModel):
-    market_id: str
-    city_key: str
-    city_name: str
-    target_date: str
-    threshold_f: float
-    metric: str
-    direction: str
-    model_probability: float
-    market_probability: float
-    edge: float
-    confidence: float
-    suggested_size: float
-    reasoning: str
-    ensemble_mean: float
-    ensemble_std: float
-    ensemble_members: int
-    actionable: bool = False
+class MarketAnalysisResponse(BaseModel):
+    session_id: int
+    text: Optional[str] = None
+    model: Optional[str] = None
+    timestamp: Optional[str] = None
+    latency_ms: Optional[float] = None
+
+
+class OddsComparisonResponse(BaseModel):
+    session_id: int
+    sportsbook_prob: Optional[float] = None
+    polymarket_prob: Optional[float] = None
+    edge: Optional[float] = None
+    bookmaker_count: Optional[int] = None
+    fetched_at: Optional[float] = None
+    configured: bool = True
+
+
+class TraderPositionResponse(BaseModel):
+    name: str
+    wallet: str
+    value_usd: float
+    pnl_usd: float
+    pnl_pct: float
+
+
+class ConsensusTradeResponse(BaseModel):
+    condition_id: str
+    market_title: str
+    market_slug: str
+    outcome: str
+    trader_count: int
+    traders: List[TraderPositionResponse]
+    total_value_usd: float
+    avg_price: float
+
+
+class WhaleScanResponse(BaseModel):
+    trades: List[ConsensusTradeResponse]
+    scanned_at: Optional[float] = None
+    trader_count: int = 0
+
+
+class BacktestTradeResponse(BaseModel):
+    side: str
+    entry_price: float
+    entry_minute: int
+    exit_price: float
+    exit_minute: int
+    exit_reason: str
+    pnl_per_share: float
+    trigger: str
+
+
+class BacktestReportResponse(BaseModel):
+    home_team: str
+    away_team: str
+    match_date: str
+    price_points: int
+    events_found: int
+    total_trades: int
+    wins: int
+    win_rate: float
+    total_pnl_per_share: float
+    trades: List[BacktestTradeResponse]
+
+
+class FootballSessionResponse(BaseModel):
+    id: int
+    polymarket_link: str
+    polymarket_slug: Optional[str] = None
+    condition_id: Optional[str] = None
+    yes_token_id: Optional[str] = None
+    no_token_id: Optional[str] = None
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    fixture_ref: Optional[str] = None
+    status: str
+    created_at: datetime
+    ended_at: Optional[datetime] = None
+    realized_pnl: float
+    total_trades: int
+    error_message: Optional[str] = None
+
+
+class StartFootballSessionRequest(BaseModel):
+    link: str
 
 
 class DashboardData(BaseModel):
@@ -211,8 +297,6 @@ class DashboardData(BaseModel):
     recent_trades: List[TradeResponse]
     equity_curve: List[dict]
     calibration: Optional[CalibrationSummary] = None
-    weather_signals: List[WeatherSignalResponse] = []
-    weather_forecasts: List[WeatherForecastResponse] = []
 
 
 class EventResponse(BaseModel):
@@ -241,13 +325,13 @@ async def startup():
                 total_trades=0,
                 winning_trades=0,
                 total_pnl=0.0,
-                is_running=True
+                is_running=settings.BTC_ENABLED
             )
             db.add(state)
             db.commit()
             print(f"Created new bot state with ${settings.INITIAL_BANKROLL:,.2f} bankroll")
         else:
-            state.is_running = True
+            state.is_running = settings.BTC_ENABLED
             db.commit()
             print(f"Loaded bot state: Bankroll ${state.bankroll:,.2f}, P&L ${state.total_pnl:+,.2f}, {state.total_trades} trades")
     finally:
@@ -264,16 +348,44 @@ async def startup():
 
     from backend.core.scheduler import start_scheduler, log_event
     start_scheduler()
-    log_event("success", "BTC 5-min trading bot initialized")
-
-    print("Bot is now running!")
-    print(f"  - BTC scan: every {settings.SCAN_INTERVAL_SECONDS}s (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})")
-    print(f"  - Settlement check: every {settings.SETTLEMENT_INTERVAL_SECONDS}s")
-    if settings.WEATHER_ENABLED:
-        print(f"  - Weather scan: every {settings.WEATHER_SCAN_INTERVAL_SECONDS}s (edge >= {settings.WEATHER_MIN_EDGE_THRESHOLD:.0%})")
-        print(f"  - Weather cities: {settings.WEATHER_CITIES}")
+    if settings.BTC_ENABLED:
+        log_event("success", "BTC 5-min trading bot initialized")
     else:
-        print("  - Weather trading: DISABLED")
+        log_event("info", "BTC trading paused (BTC_ENABLED=false) — football-only mode")
+
+    # Football sessions are tracked by an in-memory pipeline that does not
+    # survive a process restart. Any row still marked "running"/"starting"
+    # from a previous process life has no live pipeline behind it — mark it
+    # stopped rather than let it sit as a misleading zombie in the dashboard.
+    from backend.models.database import FootballSession
+    db = SessionLocal()
+    try:
+        orphaned = db.query(FootballSession).filter(
+            FootballSession.status.in_(["running", "starting"])
+        ).all()
+        for session in orphaned:
+            session.status = "stopped"
+            session.error_message = "Interrupted by server restart"
+            session.ended_at = datetime.utcnow()
+        if orphaned:
+            db.commit()
+            print(f"Marked {len(orphaned)} orphaned football session(s) as stopped (no live pipeline after restart)")
+    finally:
+        db.close()
+
+    if settings.BTC_ENABLED:
+        print("Bot is now running!")
+        print(f"  - BTC scan: every {settings.SCAN_INTERVAL_SECONDS}s (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})")
+        print(f"  - Settlement check: every {settings.SETTLEMENT_INTERVAL_SECONDS}s")
+    else:
+        print("BTC trading paused (BTC_ENABLED=false) — football-only mode")
+
+    # Settle crypto scalp trades orphaned by the previous restart
+    if settings.CRYPTO_ENABLED:
+        import asyncio
+        from backend.crypto.engine import settle_orphaned_trades
+        asyncio.create_task(settle_orphaned_trades())
+
     print("=" * 60)
 
 
@@ -359,6 +471,104 @@ async def get_btc_windows():
         return []
 
 
+@app.get("/api/crypto/status", response_model=CryptoStatusResponse)
+async def get_crypto_status():
+    """Crypto scalp engine running state, open positions, today's P&L."""
+    from backend.crypto.engine import get_engine_status
+    return CryptoStatusResponse(**await get_engine_status())
+
+
+@app.post("/api/crypto/start")
+async def start_crypto_engine():
+    from backend.crypto.engine import set_engine_running
+    from backend.core.scheduler import log_event
+
+    ok, reason = set_engine_running(True)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    log_event("success", "Crypto scalp engine started")
+    return {"status": "started", "is_running": True}
+
+
+@app.post("/api/crypto/stop")
+async def stop_crypto_engine():
+    from backend.crypto.engine import set_engine_running
+    from backend.core.scheduler import log_event
+
+    set_engine_running(False)
+    log_event("info", "Crypto scalp engine paused")
+    return {"status": "stopped", "is_running": False}
+
+
+@app.get("/api/crypto/markets", response_model=List[CryptoMarketResponse])
+async def get_crypto_markets():
+    """Active BTC 5m+15m windows with live scalp signal (edge/direction/confidence)."""
+    from backend.crypto.engine import _fetch_all_markets
+    from backend.core.signals import generate_btc_signal
+
+    try:
+        markets = await _fetch_all_markets()
+    except Exception:
+        return []
+
+    results = []
+    for m in markets:
+        signal = None
+        try:
+            signal = await generate_btc_signal(m)
+        except Exception:
+            pass
+        results.append(CryptoMarketResponse(
+            slug=m.slug,
+            market_id=m.market_id,
+            window_minutes=m.window_minutes,
+            up_price=m.up_price,
+            down_price=m.down_price,
+            window_end=m.window_end,
+            volume=m.volume,
+            time_until_end=m.time_until_end,
+            signal_direction=signal.direction if signal else None,
+            signal_edge=signal.edge if signal else None,
+            signal_confidence=signal.confidence if signal else None,
+        ))
+    return results
+
+
+@app.get("/api/crypto/trades", response_model=List[TradeResponse])
+async def get_crypto_trades(limit: int = 50, db: Session = Depends(get_db)):
+    trades = db.query(Trade).filter(Trade.market_type == "crypto_scalp").order_by(
+        Trade.timestamp.desc()
+    ).limit(limit).all()
+    return [
+        TradeResponse(
+            id=t.id,
+            market_ticker=t.market_ticker,
+            platform=t.platform,
+            event_slug=t.event_slug,
+            direction=t.direction,
+            entry_price=t.entry_price,
+            size=t.size,
+            timestamp=t.timestamp,
+            settled=t.settled,
+            result=t.result,
+            pnl=t.pnl,
+            exit_reason=t.exit_reason,
+        )
+        for t in trades
+    ]
+
+
+@app.post("/api/crypto/scan")
+async def run_crypto_scan():
+    """Manually trigger one crypto scalp engine tick (entry + exit checks)."""
+    from backend.crypto.engine import scan_and_scalp
+    from backend.core.scheduler import log_event
+
+    log_event("info", "Manual crypto scan triggered")
+    await scan_and_scalp()
+    return {"status": "ok"}
+
+
 @app.get("/api/signals", response_model=List[SignalResponse])
 async def get_signals():
     """Get current BTC trading signals."""
@@ -425,7 +635,8 @@ async def get_trades(
             timestamp=t.timestamp,
             settled=t.settled,
             result=t.result,
-            pnl=t.pnl
+            pnl=t.pnl,
+            exit_reason=t.exit_reason,
         )
         for t in trades
     ]
@@ -433,7 +644,7 @@ async def get_trades(
 
 @app.get("/api/equity-curve")
 async def get_equity_curve(db: Session = Depends(get_db)):
-    trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
+    trades = db.query(Trade).filter(Trade.market_type == "btc", Trade.settled == True).order_by(Trade.timestamp).all()
 
     curve = []
     cumulative_pnl = 0
@@ -497,32 +708,18 @@ async def run_scan(db: Session = Depends(get_db)):
         state.last_run = datetime.utcnow()
         db.commit()
 
-    log_event("info", "Manual scan triggered (BTC + Weather)")
+    log_event("info", "Manual scan triggered (BTC)")
     await run_manual_scan()
 
     signals = await scan_for_signals()
     actionable = [s for s in signals if s.passes_threshold]
 
-    result = {
+    return {
         "status": "ok",
         "total_signals": len(signals),
         "actionable_signals": len(actionable),
         "timestamp": datetime.utcnow().isoformat(),
     }
-
-    # Also run weather scan if enabled
-    if settings.WEATHER_ENABLED:
-        try:
-            from backend.core.weather_signals import scan_for_weather_signals
-            wx_signals = await scan_for_weather_signals()
-            wx_actionable = [s for s in wx_signals if s.passes_threshold]
-            result["weather_signals"] = len(wx_signals)
-            result["weather_actionable"] = len(wx_actionable)
-        except Exception:
-            result["weather_signals"] = 0
-            result["weather_actionable"] = 0
-
-    return result
 
 
 @app.post("/api/settle-trades")
@@ -543,9 +740,17 @@ async def settle_trades_endpoint(db: Session = Depends(get_db)):
 
 
 def _compute_calibration_summary(db: Session) -> Optional[CalibrationSummary]:
-    """Compute calibration summary from settled signals."""
-    total_signals = db.query(Signal).count()
-    settled_signals = db.query(Signal).filter(Signal.outcome_correct.isnot(None)).all()
+    """Compute calibration summary from settled signals.
+
+    BTC-only: outcome_correct/Brier scoring assumes a binary 0/1 settlement_value,
+    which is only meaningful for BTC's pass/fail resolution — football's
+    settlement_value is a continuous exit price (see backend/core/settlement.py's
+    market_type=="football" skip) and would silently corrupt this aggregate if mixed in.
+    """
+    total_signals = db.query(Signal).filter(Signal.market_type == "btc").count()
+    settled_signals = db.query(Signal).filter(
+        Signal.market_type == "btc", Signal.outcome_correct.isnot(None)
+    ).all()
 
     if not settled_signals:
         if total_signals == 0:
@@ -592,7 +797,9 @@ def _compute_calibration_summary(db: Session) -> Optional[CalibrationSummary]:
 @app.get("/api/calibration")
 async def get_calibration(db: Session = Depends(get_db)):
     """Return calibration data: predicted probability vs actual win rate."""
-    signals = db.query(Signal).filter(Signal.outcome_correct.isnot(None)).all()
+    signals = db.query(Signal).filter(
+        Signal.market_type == "btc", Signal.outcome_correct.isnot(None)
+    ).all()
 
     if not signals:
         return {"buckets": [], "summary": None}
@@ -627,148 +834,193 @@ async def get_calibration(db: Session = Depends(get_db)):
     return {"buckets": buckets, "summary": summary}
 
 
-# Kalshi endpoints
-@app.get("/api/kalshi/status")
-async def get_kalshi_status():
-    """Test Kalshi API authentication and return connection status."""
-    from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
-
-    if not kalshi_credentials_present():
-        return {
-            "connected": False,
-            "error": "Kalshi credentials not configured (KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH)",
-        }
-
-    try:
-        client = KalshiClient()
-        balance_data = await client.get_balance()
-        return {
-            "connected": True,
-            "balance": balance_data,
-        }
-    except Exception as e:
-        return {
-            "connected": False,
-            "error": str(e),
-        }
-
-
-# Weather endpoints
-@app.get("/api/weather/forecasts", response_model=List[WeatherForecastResponse])
-async def get_weather_forecasts():
-    """Get ensemble forecasts for configured cities."""
-    if not settings.WEATHER_ENABLED:
+# Football endpoints (read-only fixture discovery)
+@app.get("/api/football/fixtures", response_model=List[FootballFixtureResponse])
+async def get_football_fixtures():
+    """Get the World Cup fixture calendar from football-data.org."""
+    if not settings.FOOTBALL_ENABLED:
         return []
 
     try:
-        from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
-        from datetime import date
+        from backend.data.football_schedule import get_schedule_service
 
-        city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
-        forecasts = []
-
-        for city_key in city_keys:
-            if city_key not in CITY_CONFIG:
-                continue
-            forecast = await fetch_ensemble_forecast(city_key)
-            if forecast:
-                forecasts.append(WeatherForecastResponse(
-                    city_key=forecast.city_key,
-                    city_name=forecast.city_name,
-                    target_date=forecast.target_date.isoformat(),
-                    mean_high=forecast.mean_high,
-                    std_high=forecast.std_high,
-                    mean_low=forecast.mean_low,
-                    std_low=forecast.std_low,
-                    num_members=forecast.num_members,
-                    ensemble_agreement=forecast.ensemble_agreement,
-                ))
-
-        return forecasts
-    except Exception:
-        return []
-
-
-@app.get("/api/weather/markets", response_model=List[WeatherMarketResponse])
-async def get_weather_markets():
-    """Get active weather temperature markets."""
-    if not settings.WEATHER_ENABLED:
-        return []
-
-    try:
-        from backend.data.weather_markets import fetch_polymarket_weather_markets
-
-        city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
-        markets = await fetch_polymarket_weather_markets(city_keys)
-
-        # Also fetch Kalshi markets if enabled
-        if settings.KALSHI_ENABLED:
-            try:
-                from backend.data.kalshi_client import kalshi_credentials_present
-                from backend.data.kalshi_markets import fetch_kalshi_weather_markets
-                if kalshi_credentials_present():
-                    kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
-                    markets.extend(kalshi_markets)
-            except Exception:
-                pass
-
+        service = get_schedule_service()
+        matches = await service.get_schedule()
         return [
-            WeatherMarketResponse(
-                slug=m.slug,
-                market_id=m.market_id,
-                platform=m.platform,
-                title=m.title,
-                city_key=m.city_key,
-                city_name=m.city_name,
-                target_date=m.target_date.isoformat(),
-                threshold_f=m.threshold_f,
-                metric=m.metric,
-                direction=m.direction,
-                yes_price=m.yes_price,
-                no_price=m.no_price,
-                volume=m.volume,
+            FootballFixtureResponse(
+                home_team=m.home_team,
+                away_team=m.away_team,
+                utc_kickoff=m.utc_kickoff,
+                status=m.status,
+                matchday=m.matchday,
+                source_id=m.source_id,
             )
-            for m in markets
+            for m in matches
         ]
     except Exception:
         return []
 
 
-@app.get("/api/weather/signals", response_model=List[WeatherSignalResponse])
-async def get_weather_signals():
-    """Get current weather trading signals."""
-    if not settings.WEATHER_ENABLED:
+@app.get("/api/football/live", response_model=List[FootballLiveMatchResponse])
+async def get_football_live_matches():
+    """Get currently live matches (Telegram primary, Flashscore fallback)."""
+    if not settings.FOOTBALL_ENABLED:
         return []
 
     try:
-        from backend.core.weather_signals import scan_for_weather_signals
+        from backend.data.football_live import get_live_source
 
-        signals = await scan_for_weather_signals()
-        return [_weather_signal_to_response(s) for s in signals]
+        source = get_live_source()
+        matches = await source.get_live_matches()
+        return [
+            FootballLiveMatchResponse(
+                fixture_id=m.fixture_id,
+                home_team=m.home_team,
+                away_team=m.away_team,
+                status=m.status,
+                minute=m.minute,
+                home_score=m.home_score,
+                away_score=m.away_score,
+                date=m.date,
+            )
+            for m in matches
+        ]
     except Exception:
         return []
 
 
-def _weather_signal_to_response(s) -> WeatherSignalResponse:
-    return WeatherSignalResponse(
-        market_id=s.market.market_id,
-        city_key=s.market.city_key,
-        city_name=s.market.city_name,
-        target_date=s.market.target_date.isoformat(),
-        threshold_f=s.market.threshold_f,
-        metric=s.market.metric,
-        direction=s.direction,
-        model_probability=s.model_probability,
-        market_probability=s.market_probability,
-        edge=s.edge,
-        confidence=s.confidence,
-        suggested_size=s.suggested_size,
-        reasoning=s.reasoning,
-        ensemble_mean=s.ensemble_mean,
-        ensemble_std=s.ensemble_std,
-        ensemble_members=s.ensemble_members,
-        actionable=s.passes_threshold,
+def _session_to_response(s) -> FootballSessionResponse:
+    return FootballSessionResponse(
+        id=s.id,
+        polymarket_link=s.polymarket_link,
+        polymarket_slug=s.polymarket_slug,
+        condition_id=s.condition_id,
+        yes_token_id=s.yes_token_id,
+        no_token_id=s.no_token_id,
+        home_team=s.home_team,
+        away_team=s.away_team,
+        fixture_ref=s.fixture_ref,
+        status=s.status,
+        created_at=s.created_at,
+        ended_at=s.ended_at,
+        realized_pnl=s.realized_pnl or 0.0,
+        total_trades=s.total_trades or 0,
+        error_message=s.error_message,
     )
+
+
+@app.post("/api/football/sessions", response_model=FootballSessionResponse)
+async def start_football_session(req: StartFootballSessionRequest):
+    """Paste a Polymarket match link to resolve it and start a per-match session."""
+    from backend.football.session_manager import start_session, SessionStartError
+
+    try:
+        session = await start_session(req.link)
+        return _session_to_response(session)
+    except SessionStartError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/football/sessions", response_model=List[FootballSessionResponse])
+async def get_football_sessions():
+    from backend.football.session_manager import list_sessions
+
+    # Offload the blocking SQLite query to a thread — unlike the BTC endpoints,
+    # this event loop also drives latency-sensitive per-session WS/spike
+    # handling (backend/football/price_trigger.py), so a long synchronous
+    # query here would stall live spike processing across all running sessions.
+    sessions = await asyncio.to_thread(list_sessions)
+    return [_session_to_response(s) for s in sessions]
+
+
+@app.post("/api/football/sessions/{session_id}/stop", response_model=FootballSessionResponse)
+async def stop_football_session(session_id: int):
+    from backend.football.session_manager import stop_session
+
+    session = await stop_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _session_to_response(session)
+
+
+@app.get("/api/football/sessions/{session_id}/analysis", response_model=MarketAnalysisResponse)
+async def get_football_match_analysis(session_id: int):
+    from backend.football.ai_analysis import get_latest_analysis
+
+    cached = get_latest_analysis(session_id)
+    if not cached:
+        return MarketAnalysisResponse(session_id=session_id)
+    return MarketAnalysisResponse(
+        session_id=session_id,
+        text=cached["text"],
+        model=cached["model"],
+        timestamp=cached["timestamp"],
+        latency_ms=cached["latency_ms"],
+    )
+
+
+@app.get("/api/football/sessions/{session_id}/odds", response_model=OddsComparisonResponse)
+async def get_football_odds_comparison(session_id: int):
+    from backend.football.odds_comparison import get_latest_odds, is_configured
+
+    if not is_configured():
+        return OddsComparisonResponse(session_id=session_id, configured=False)
+
+    cached = get_latest_odds(session_id)
+    if not cached:
+        return OddsComparisonResponse(session_id=session_id)
+    return OddsComparisonResponse(session_id=session_id, **cached)
+
+
+@app.post("/api/whales/scan", response_model=WhaleScanResponse)
+async def run_whale_scan():
+    """On-demand scan of the top 20 Polymarket sports traders' open positions
+    for consensus bets (3+ of them on the same side of the same market)."""
+    from backend.football.whale_tracker import find_consensus_trades
+
+    try:
+        result = await find_consensus_trades()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Whale scan failed: {e}")
+    return WhaleScanResponse(**result)
+
+
+@app.get("/api/whales/scan", response_model=WhaleScanResponse)
+async def get_whale_scan():
+    """Last cached whale-consensus scan, without re-running it."""
+    from backend.football.whale_tracker import get_last_scan
+
+    return WhaleScanResponse(**get_last_scan())
+
+
+@app.post("/api/football/sessions/{session_id}/backtest", response_model=BacktestReportResponse)
+async def run_session_backtest(session_id: int, db: Session = Depends(get_db)):
+    """Replay the reversion model against this session's real historical
+    ESPN events + Polymarket price history. See backend/football/backtest.py's
+    module docstring for what this does and does not capture."""
+    from backend.football.backtest import run_backtest
+    from backend.models.database import FootballSession
+
+    session = db.query(FootballSession).filter(FootballSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.home_team or not session.away_team or not session.yes_token_id:
+        raise HTTPException(status_code=400, detail="Session is missing team names or token id")
+
+    match_date = session.created_at.strftime("%Y-%m-%d")
+    try:
+        result = await run_backtest(session.home_team, session.away_team, session.yes_token_id, match_date)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return BacktestReportResponse(**result)
+
+
+@app.get("/api/football/risk-status")
+async def get_football_risk_status():
+    """Portfolio-wide football risk state — shared across all concurrent sessions."""
+    from backend.football.risk import get_portfolio_risk
+
+    return get_portfolio_risk().get_status_summary()
 
 
 @app.get("/api/events", response_model=List[EventResponse])
@@ -925,6 +1177,46 @@ async def get_dashboard(db: Session = Depends(get_db)):
     except Exception:
         pass
 
+    # Football signals (persisted by the session pipeline — read from DB, not live-scanned)
+    try:
+        football_signals = (
+            db.query(Signal)
+            .filter(Signal.market_type == "football")
+            .order_by(Signal.timestamp.desc())
+            .limit(50)
+            .all()
+        )
+        session_ids = {s.football_session_id for s in football_signals if s.football_session_id}
+        sessions_by_id = {}
+        if session_ids:
+            for sess in db.query(FootballSession).filter(FootballSession.id.in_(session_ids)).all():
+                sessions_by_id[sess.id] = sess
+
+        for s in football_signals:
+            sess = sessions_by_id.get(s.football_session_id)
+            title = f"{sess.home_team} vs {sess.away_team}" if sess else s.market_ticker
+            signals.append(SignalResponse(
+                market_ticker=s.market_ticker,
+                market_title=title,
+                platform=s.platform or "polymarket",
+                direction=s.direction,
+                model_probability=s.model_probability,
+                market_probability=s.market_price,
+                edge=s.edge,
+                confidence=s.confidence,
+                suggested_size=s.suggested_size or 0.0,
+                reasoning=s.reasoning or "",
+                timestamp=s.timestamp,
+                category="football",
+                event_slug=None,
+                btc_price=0.0,
+                btc_change_24h=0.0,
+                window_end=None,
+                actionable=False,
+            ))
+    except Exception:
+        pass
+
     # Recent trades
     trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(50).all()
     recent_trades = [
@@ -939,13 +1231,14 @@ async def get_dashboard(db: Session = Depends(get_db)):
             timestamp=t.timestamp,
             settled=t.settled,
             result=t.result,
-            pnl=t.pnl
+            pnl=t.pnl,
+            exit_reason=t.exit_reason,
         )
         for t in trades
     ]
 
-    # Equity curve
-    equity_trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
+    # Equity curve (BTC-only — see get_equity_curve for why)
+    equity_trades = db.query(Trade).filter(Trade.market_type == "btc", Trade.settled == True).order_by(Trade.timestamp).all()
     equity_curve = []
     cumulative_pnl = 0
     for trade in equity_trades:
@@ -960,37 +1253,6 @@ async def get_dashboard(db: Session = Depends(get_db)):
     # Calibration summary
     calibration = _compute_calibration_summary(db)
 
-    # Weather data (if enabled)
-    weather_signals_data = []
-    weather_forecasts_data = []
-    if settings.WEATHER_ENABLED:
-        try:
-            from backend.core.weather_signals import scan_for_weather_signals
-            from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
-
-            wx_signals = await scan_for_weather_signals()
-            weather_signals_data = [_weather_signal_to_response(s) for s in wx_signals]
-
-            city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
-            for city_key in city_keys:
-                if city_key not in CITY_CONFIG:
-                    continue
-                forecast = await fetch_ensemble_forecast(city_key)
-                if forecast:
-                    weather_forecasts_data.append(WeatherForecastResponse(
-                        city_key=forecast.city_key,
-                        city_name=forecast.city_name,
-                        target_date=forecast.target_date.isoformat(),
-                        mean_high=forecast.mean_high,
-                        std_high=forecast.std_high,
-                        mean_low=forecast.mean_low,
-                        std_low=forecast.std_low,
-                        num_members=forecast.num_members,
-                        ensemble_agreement=forecast.ensemble_agreement,
-                    ))
-        except Exception:
-            pass
-
     return DashboardData(
         stats=stats,
         btc_price=btc_price_data,
@@ -1000,8 +1262,6 @@ async def get_dashboard(db: Session = Depends(get_db)):
         recent_trades=recent_trades,
         equity_curve=equity_curve,
         calibration=calibration,
-        weather_signals=weather_signals_data,
-        weather_forecasts=weather_forecasts_data,
     )
 
 

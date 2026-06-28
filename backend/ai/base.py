@@ -140,6 +140,52 @@ Be concise and actionable."""
     return prompt
 
 
+def create_match_analysis_prompt(data: Dict[str, Any]) -> str:
+    """Create a prompt for a live football-match market analysis (order book + match state)."""
+    book = data.get("order_book", {})
+    bids = book.get("bids", [])
+    asks = book.get("asks", [])
+    bid_lines = "\n".join(f"  {b['price']:.3f} x {b['size']:.0f}" for b in bids) or "  (none)"
+    ask_lines = "\n".join(f"  {a['price']:.3f} x {a['size']:.0f}" for a in asks) or "  (none)"
+
+    open_trades = data.get("open_trades", [])
+    trades_summary = "\n".join(
+        f"  - {t['side']} ${t['size']:.2f} @ {t['entry_price']:.3f} (opened {t['minutes_ago']:.0f}m ago)"
+        for t in open_trades
+    ) or "  (none)"
+
+    odds = data.get("sportsbook_odds")
+    odds_block = (
+        f"\nSportsbook consensus ({odds['bookmaker_count']} books): {odds['sportsbook_prob']:.1%} implied "
+        f"for {data.get('home_team', 'home')} vs Polymarket's {odds['polymarket_prob']:.1%} (edge {odds['edge']:+.1%})\n"
+        if odds else ""
+    )
+
+    return f"""You are a sports-prediction-market analyst. Give a concise but detailed read on this live market.
+
+Match: {data.get('home_team', '?')} vs {data.get('away_team', '?')}
+Minute: {data.get('minute', '?')}'  Score: {data.get('home_score', 0)}-{data.get('away_score', 0)}  Status: {data.get('match_status', 'unknown')}
+
+Polymarket YES price (home win): {data.get('yes_price', 0):.3f}
+Pre-match baseline price: {data.get('baseline_price', 0):.3f}
+Price drift since kickoff: {data.get('price_drift', 0):+.3f}
+Spread: {data.get('spread', 0):.3f}
+Total order-book depth: ${data.get('depth_usd', 0):,.0f}
+{odds_block}
+Order book (YES token):
+Bids:
+{bid_lines}
+Asks:
+{ask_lines}
+
+Bot's open paper positions this match:
+{trades_summary}
+
+Paper-trading capital: ${data.get('capital', 0):.2f} (started at ${data.get('initial_capital', 0):.2f}), {data.get('total_trades', 0)} trades so far, {data.get('win_rate', 0):.0f}% win rate.
+
+In 3-5 sentences: assess whether the current price looks fair, overreacting, or under-reacting given the match state (factor in the sportsbook consensus above if present — a meaningful gap from it is itself a signal); note any liquidity/spread concerns for trading at this size; and flag anything actionable for a mean-reversion scalper. Be concrete and reference the actual numbers above. Do not give financial advice disclaimers."""
+
+
 def create_classification_prompt(title: str, description: str = "") -> str:
     """Create a prompt for market classification."""
     return f"""Classify this prediction market into one category:

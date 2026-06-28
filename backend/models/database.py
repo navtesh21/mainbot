@@ -26,7 +26,8 @@ class Trade(Base):
     market_ticker = Column(String, index=True)
     platform = Column(String)
     event_slug = Column(String, nullable=True)
-    market_type = Column(String, default="btc", index=True)  # "btc" or "weather"
+    market_type = Column(String, default="btc", index=True)  # "btc" (more added later)
+    football_session_id = Column(Integer, nullable=True, index=True)
 
     # Trade details
     direction = Column(String)  # "up" or "down"
@@ -40,6 +41,7 @@ class Trade(Base):
     settlement_value = Column(Float, nullable=True)  # 1.0=Up won, 0.0=Down won
     result = Column(String, default="pending")  # pending, win, loss
     pnl = Column(Float, nullable=True)
+    exit_reason = Column(String, nullable=True)  # e.g. "profit_0.041", "stop_-0.021", "timeout_88s"
 
     # Model performance tracking
     model_probability = Column(Float)
@@ -77,7 +79,8 @@ class Signal(Base):
     id = Column(Integer, primary_key=True, index=True)
     market_ticker = Column(String, index=True)
     platform = Column(String)
-    market_type = Column(String, default="btc", index=True)  # "btc" or "weather"
+    market_type = Column(String, default="btc", index=True)  # "btc" (more added later)
+    football_session_id = Column(Integer, nullable=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
     direction = Column(String)
@@ -99,6 +102,28 @@ class Signal(Base):
     outcome_correct = Column(Boolean, nullable=True)   # did our direction prediction match?
     settlement_value = Column(Float, nullable=True)     # 1.0=UP won, 0.0=DOWN won
     settled_at = Column(DateTime, nullable=True)        # when we recorded the outcome
+
+
+class FootballSession(Base):
+    """A per-match football trading session, started by pasting a Polymarket link."""
+    __tablename__ = "football_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    polymarket_link = Column(String)
+    polymarket_slug = Column(String, index=True)
+    condition_id = Column(String, index=True)
+    yes_token_id = Column(String, nullable=True)
+    no_token_id = Column(String, nullable=True)
+    home_team = Column(String, nullable=True)
+    away_team = Column(String, nullable=True)
+    fixture_ref = Column(String, nullable=True)  # correlated fixture key (source + id)
+
+    status = Column(String, default="starting", index=True)  # starting, running, stopped, finished, error
+    created_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    realized_pnl = Column(Float, default=0.0)
+    total_trades = Column(Integer, default=0)
+    error_message = Column(String, nullable=True)
 
 
 class AILog(Base):
@@ -174,6 +199,16 @@ def ensure_schema():
             with conn.begin():
                 conn.execute(text("ALTER TABLE trades ADD COLUMN market_type VARCHAR DEFAULT 'btc'"))
 
+    if "football_session_id" not in columns:
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("ALTER TABLE trades ADD COLUMN football_session_id INTEGER"))
+
+    if "exit_reason" not in columns:
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("ALTER TABLE trades ADD COLUMN exit_reason VARCHAR"))
+
     # Add calibration columns to signals table
     try:
         signal_columns = [col["name"] for col in inspector.get_columns("signals")]
@@ -188,6 +223,7 @@ def ensure_schema():
                 ("settlement_value", "FLOAT"),
                 ("settled_at", "DATETIME"),
                 ("market_type", "VARCHAR DEFAULT 'btc'"),
+                ("football_session_id", "INTEGER"),
             ]:
                 if col not in signal_columns:
                     try:

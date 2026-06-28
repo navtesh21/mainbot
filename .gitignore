@@ -50,6 +50,9 @@ logs/
 # Cache
 .cache/
 *.cache
+backend/data/_cache/
+backend/football/_data/
+backend/crypto/_data/
 
 # Test
 .coverage

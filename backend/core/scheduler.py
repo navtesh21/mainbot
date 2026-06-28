@@ -57,6 +57,10 @@ async def scan_and_trade_job():
     Background job: Scan BTC 5-min markets, generate signals, execute trades.
     Runs every minute.
     """
+    if not settings.BTC_ENABLED:
+        log_event("info", "BTC scan skipped (BTC_ENABLED=false)")
+        return
+
     log_event("info", "Scanning BTC 5-min markets...")
 
     try:
@@ -88,9 +92,11 @@ async def scan_and_trade_job():
             MAX_TRADE_FRACTION = 0.03  # 3% max per trade
             MAX_TOTAL_PENDING = settings.MAX_TOTAL_PENDING_TRADES
 
-            # --- Daily loss circuit breaker ---
+            # --- Daily loss circuit breaker (BTC-only — football has its own
+            # separate risk ledger in backend/football/risk.py) ---
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             daily_pnl = db.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
+                Trade.market_type == "btc",
                 Trade.settled == True,
                 Trade.settlement_time >= today_start
             ).scalar()
@@ -99,7 +105,7 @@ async def scan_and_trade_job():
                 log_event("warning", f"Daily loss limit hit: ${daily_pnl:.2f} (limit: -${settings.DAILY_LOSS_LIMIT:.0f}). Stopping trades.")
                 return
 
-            total_pending = db.query(Trade).filter(Trade.settled == False).count()
+            total_pending = db.query(Trade).filter(Trade.market_type == "btc", Trade.settled == False).count()
             if total_pending >= MAX_TOTAL_PENDING:
                 log_event("info", f"Max pending trades reached ({total_pending}/{MAX_TOTAL_PENDING})")
                 return
@@ -183,135 +189,6 @@ async def scan_and_trade_job():
         logger.exception("Error in scan_and_trade_job")
 
 
-async def weather_scan_and_trade_job():
-    """
-    Background job: Scan weather temperature markets, generate signals, execute trades.
-    Runs every 5 minutes when WEATHER_ENABLED.
-    """
-    log_event("info", "Scanning weather temperature markets...")
-
-    try:
-        from backend.core.weather_signals import scan_for_weather_signals
-
-        signals = await scan_for_weather_signals()
-        actionable = [s for s in signals if s.passes_threshold]
-
-        log_event("data", f"Weather: {len(signals)} signals, {len(actionable)} actionable", {
-            "total_signals": len(signals),
-            "actionable": len(actionable),
-        })
-
-        if not actionable:
-            log_event("info", "No actionable weather signals")
-            return
-
-        db = SessionLocal()
-        try:
-            state = db.query(BotState).first()
-            if not state:
-                log_event("error", "Bot state not initialized")
-                return
-
-            if not state.is_running:
-                log_event("info", "Bot is paused, skipping weather trades")
-                return
-
-            MAX_TRADES_PER_SCAN = 3
-            MIN_TRADE_SIZE = 10
-            MAX_WEATHER_ALLOCATION = 500.0  # Max total exposure to weather markets
-
-            # Check weather allocation limit
-            weather_pending = db.query(func.coalesce(func.sum(Trade.size), 0.0)).filter(
-                Trade.settled == False,
-                Trade.market_type == "weather",
-            ).scalar()
-
-            if weather_pending >= MAX_WEATHER_ALLOCATION:
-                log_event("info", f"Weather allocation limit reached: ${weather_pending:.0f}/${MAX_WEATHER_ALLOCATION:.0f}")
-                return
-
-            trades_executed = 0
-            for signal in actionable[:MAX_TRADES_PER_SCAN]:
-                # Check if we already have a trade for this market
-                existing = db.query(Trade).filter(
-                    Trade.market_ticker == signal.market.market_id,
-                    Trade.settled == False,
-                ).first()
-
-                if existing:
-                    continue
-
-                trade_size = min(signal.suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
-                trade_size = max(trade_size, MIN_TRADE_SIZE)
-
-                if state.bankroll < MIN_TRADE_SIZE:
-                    log_event("warning", f"Bankroll too low: ${state.bankroll:.2f}")
-                    break
-
-                if trades_executed >= MAX_TRADES_PER_SCAN:
-                    break
-
-                entry_price = signal.market.yes_price if signal.direction == "yes" else signal.market.no_price
-
-                trade = Trade(
-                    market_ticker=signal.market.market_id,
-                    platform=signal.market.platform,
-                    event_slug=signal.market.slug,
-                    market_type="weather",
-                    direction=signal.direction,
-                    entry_price=entry_price,
-                    size=trade_size,
-                    model_probability=signal.model_probability,
-                    market_price_at_entry=signal.market_probability,
-                    edge_at_entry=signal.edge,
-                )
-
-                db.add(trade)
-                db.flush()
-
-                # Link to signal record
-                matching_signal = db.query(Signal).filter(
-                    Signal.market_ticker == signal.market.market_id,
-                    Signal.market_type == "weather",
-                    Signal.executed == False,
-                ).order_by(Signal.timestamp.desc()).first()
-                if matching_signal:
-                    matching_signal.executed = True
-                    trade.signal_id = matching_signal.id
-
-                state.total_trades += 1
-                trades_executed += 1
-
-                log_event("trade",
-                    f"WX {signal.market.city_name}: {signal.direction.upper()} "
-                    f"${trade_size:.0f} @ {entry_price:.0%} | "
-                    f"{signal.market.metric} {signal.market.direction} {signal.market.threshold_f:.0f}F",
-                    {
-                        "slug": signal.market.slug,
-                        "direction": signal.direction,
-                        "size": trade_size,
-                        "edge": signal.edge,
-                        "entry_price": entry_price,
-                        "city": signal.market.city_name,
-                    }
-                )
-
-            state.last_run = datetime.utcnow()
-            db.commit()
-
-            if trades_executed > 0:
-                log_event("success", f"Executed {trades_executed} weather trade(s)")
-            else:
-                log_event("info", "No new weather trades executed")
-
-        finally:
-            db.close()
-
-    except Exception as e:
-        log_event("error", f"Weather scan error: {str(e)}")
-        logger.exception("Error in weather_scan_and_trade_job")
-
-
 async def settlement_job():
     """
     Background job: Check and settle pending trades.
@@ -387,7 +264,15 @@ async def heartbeat_job():
 
 
 def start_scheduler():
-    """Start the background scheduler for BTC 5-min trading."""
+    """Start the background scheduler.
+
+    Previously this returned early when BTC_ENABLED was false, which meant
+    the scheduler was never even constructed — so settlement_job/heartbeat_job
+    never ran either, and no other job (e.g. crypto_scan_job) could run while
+    BTC was disabled. Each job already self-gates on its own feature flag
+    (scan_and_trade_job checks BTC_ENABLED, crypto_scan_job checks
+    CRYPTO_ENABLED), so the scheduler itself should always start.
+    """
     global scheduler
 
     if scheduler is not None and scheduler.running:
@@ -399,7 +284,7 @@ def start_scheduler():
     scan_seconds = settings.SCAN_INTERVAL_SECONDS
     settle_seconds = settings.SETTLEMENT_INTERVAL_SECONDS
 
-    # Scan BTC markets every minute
+    # Scan BTC markets every minute (no-ops internally if BTC_ENABLED=false)
     scheduler.add_job(
         scan_and_trade_job,
         IntervalTrigger(seconds=scan_seconds),
@@ -426,31 +311,38 @@ def start_scheduler():
         max_instances=1
     )
 
-    # Weather trading jobs (gated by WEATHER_ENABLED)
-    if settings.WEATHER_ENABLED:
-        weather_scan_seconds = settings.WEATHER_SCAN_INTERVAL_SECONDS
-        weather_settle_seconds = settings.WEATHER_SETTLEMENT_INTERVAL_SECONDS
+    # Crypto scalp scan (no-ops internally if CRYPTO_ENABLED=false)
+    from backend.crypto.engine import crypto_scan_job, crypto_exit_job
+    scheduler.add_job(
+        crypto_scan_job,
+        IntervalTrigger(seconds=settings.CRYPTO_SCAN_INTERVAL_SECONDS),
+        id="crypto_scalp_scan",
+        replace_existing=True,
+        max_instances=1
+    )
 
-        scheduler.add_job(
-            weather_scan_and_trade_job,
-            IntervalTrigger(seconds=weather_scan_seconds),
-            id="weather_scan",
-            replace_existing=True,
-            max_instances=1,
-        )
+    # Fast exit loop — checks open positions every 2s so stops fire at -3c
+    # instead of waiting for the 12s scan tick (by which time token may be at 0c)
+    scheduler.add_job(
+        crypto_exit_job,
+        IntervalTrigger(seconds=2),
+        id="crypto_exit_fast",
+        replace_existing=True,
+        max_instances=1
+    )
 
     scheduler.start()
-    log_event("success", "BTC 5-min trading scheduler started", {
+    log_event("success", "Scheduler started", {
+        "btc_enabled": settings.BTC_ENABLED,
+        "crypto_enabled": settings.CRYPTO_ENABLED,
         "scan_interval": f"{scan_seconds}s",
         "settlement_interval": f"{settle_seconds}s",
-        "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
-        "weather_enabled": settings.WEATHER_ENABLED,
+        "crypto_scan_interval": f"{settings.CRYPTO_SCAN_INTERVAL_SECONDS}s",
     })
 
     asyncio.create_task(scan_and_trade_job())
-
-    if settings.WEATHER_ENABLED:
-        asyncio.create_task(weather_scan_and_trade_job())
+    asyncio.create_task(crypto_scan_job())
+    asyncio.create_task(crypto_exit_job())
 
 
 def stop_scheduler():

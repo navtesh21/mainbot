@@ -5,7 +5,7 @@ import re
 from typing import Optional, Dict, Any, List
 import logging
 
-from .base import AIAnalysis, AnomalyReport, BaseAIClient, create_signal_prompt, create_classification_prompt
+from .base import AIAnalysis, AnomalyReport, BaseAIClient, create_signal_prompt, create_classification_prompt, create_match_analysis_prompt
 from .logger import get_ai_logger
 
 logger = logging.getLogger(__name__)
@@ -219,6 +219,38 @@ timeframe: <date/period or N/A>"""
                 model_used=self.model,
                 provider="gemini",
                 latency_ms=(time.time() - start_time) * 1000
+            )
+
+    async def analyze_match(self, data: Dict[str, Any]) -> AIAnalysis:
+        """Detailed periodic read on a live football match's Polymarket order book + state."""
+        start_time = time.time()
+        try:
+            prompt = create_match_analysis_prompt(data)
+            result, tokens_used = await self._generate(prompt, max_tokens=350, temperature=0.4)
+            latency_ms = (time.time() - start_time) * 1000
+
+            self._log_to_db(
+                "gemini", "match_analysis", prompt, result, latency_ms, tokens_used,
+                related_market=data.get("condition_id"),
+            )
+
+            return AIAnalysis(
+                reasoning=result,
+                confidence=0.6,
+                raw_response=result,
+                model_used=self.model,
+                provider="gemini",
+                latency_ms=latency_ms,
+                tokens_used=tokens_used,
+            )
+        except Exception as e:
+            logger.error(f"Gemini match analysis failed: {e}")
+            return AIAnalysis(
+                reasoning=f"Analysis unavailable: {e}",
+                confidence=0.0,
+                model_used=self.model,
+                provider="gemini",
+                latency_ms=(time.time() - start_time) * 1000,
             )
 
     async def detect_anomalies(self, markets: List[Dict[str, Any]]) -> List[AnomalyReport]:

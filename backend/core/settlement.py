@@ -1,4 +1,4 @@
-"""Trade settlement logic for BTC 5-min and weather markets using Polymarket API."""
+"""Trade settlement logic for BTC 5-min markets using Polymarket API."""
 import httpx
 import json
 import logging
@@ -177,56 +177,6 @@ async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], 
     return True, settlement_value, pnl
 
 
-async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float]]:
-    """
-    Check if a weather trade's market has settled.
-    Routes to the correct platform's resolution method.
-    """
-    platform = getattr(trade, 'platform', 'polymarket') or 'polymarket'
-
-    if platform == "kalshi":
-        is_resolved, settlement_value = await _fetch_kalshi_resolution(trade.market_ticker)
-    else:
-        is_resolved, settlement_value = await fetch_polymarket_resolution(
-            trade.market_ticker,
-            event_slug=trade.event_slug,
-        )
-
-    if is_resolved and settlement_value is not None:
-        pnl = calculate_pnl(trade, settlement_value)
-        return True, settlement_value, pnl
-
-    return False, None, None
-
-
-async def _fetch_kalshi_resolution(ticker: str) -> Tuple[bool, Optional[float]]:
-    """Fetch resolution status for a Kalshi market."""
-    try:
-        from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
-
-        if not kalshi_credentials_present():
-            return False, None
-
-        client = KalshiClient()
-        data = await client.get_market(ticker)
-        market = data.get("market", data)
-
-        status = market.get("status", "")
-        result = market.get("result", "")
-
-        if status in ("finalized", "determined") and result:
-            if result == "yes":
-                return True, 1.0
-            elif result == "no":
-                return True, 0.0
-
-        return False, None
-
-    except Exception as e:
-        logger.warning(f"Failed to fetch Kalshi resolution for {ticker}: {e}")
-        return False, None
-
-
 async def settle_pending_trades(db: Session) -> List[Trade]:
     """
     Process all pending trades for settlement.
@@ -247,12 +197,17 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
 
     for trade in pending:
         try:
-            # Route settlement by market type
-            market_type = getattr(trade, 'market_type', 'btc') or 'btc'
-            if market_type == "weather":
-                is_settled, settlement_value, pnl = await check_weather_settlement(trade)
-            else:
-                is_settled, settlement_value, pnl = await check_market_settlement(trade)
+            if trade.market_type in ("football", "crypto_scalp"):
+                # Football and crypto-scalp trades self-settle via their own
+                # active scalp exit loops (backend/football/session_manager.py
+                # ::_exit_loop, backend/crypto/engine.py::scan_and_scalp) —
+                # this passive 0/1 Polymarket-resolution poll doesn't apply
+                # since their settlement_value/pnl come from an early exit
+                # price at partial size, not the binary window outcome at
+                # full size.
+                continue
+
+            is_settled, settlement_value, pnl = await check_market_settlement(trade)
 
             if is_settled and settlement_value is not None:
                 trade.settled = True

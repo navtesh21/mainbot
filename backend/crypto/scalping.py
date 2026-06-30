@@ -24,8 +24,8 @@ MAX_SIZE = 5.0
 # Asymmetric risk/reward: 2:1 reward/risk — same token price scale (0-1) as
 # football's Polymarket tokens, so these are kept identical.
 PROFIT_TARGET = 0.06    # 6c — binary convergence can produce 10-30c swings
-STOP_LOSS = 0.03        # 3c — wider stop to survive early noise
-PARTIAL_EXIT_LEVEL = 0.03  # 3c partial lock-in
+STOP_LOSS = 0.04        # 4c — wider than 3c to reduce gap-through slippage (2s loop lags real moves)
+PARTIAL_EXIT_LEVEL = 0.04  # 4c partial lock-in
 
 HARD_STOP_PCT = 0.03
 MAX_LOSS_USD = 0.50
@@ -99,5 +99,7 @@ def evaluate_exit(position: dict, current_price: float) -> Optional[ExitDecision
     if pnl_per_share <= -STOP_LOSS:
         return ExitDecision("stop", 1.0, f"stop_{pnl_per_share:.3f}")
     if elapsed >= timeout:
-        return ExitDecision("timeout", 0.5 if position.get("partial_exited") else 1.0, f"timeout_{elapsed:.0f}s")
+        # Always exit 100% at timeout — never hold half a position to binary settlement.
+        # Binary settlement losses (-$0.73 to -$1.05) dwarf any upside from riding to expiry.
+        return ExitDecision("timeout", 1.0, f"timeout_{elapsed:.0f}s")
     return None

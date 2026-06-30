@@ -1,17 +1,19 @@
-"""Crypto scalp engine — BTC 5m/15m Up/Down markets on Polymarket.
+"""Crypto scalp engine — BTC 15m Up/Down markets on Polymarket.
 
 Entry signal: compare current BTC price vs price_to_beat (BTC price at window
 open, cached on first scan). Compute implied probability using a random-walk
-model (BTC realized vol ~0.18% per 5m). Enter when implied prob > live token
+model (BTC realized vol ~0.12% per 5m). Enter when implied prob > live token
 price + MIN_EDGE, i.e. the market hasn't priced in the BTC move yet.
 
-Exit: CLOB mid-price every 2s (fast loop) + 12s full scan. Stop at -3c,
-profit at fair_value (implied prob at entry), timeout at 250s/800s.
+Exit: CLOB mid-price every 2s (fast loop) + 5s full scan. Stop at -4c,
+profit at fair_value (implied prob at entry), timeout at 800s (full exit).
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import time
 from datetime import datetime
 from typing import Optional
@@ -30,36 +32,55 @@ logger = logging.getLogger("trading_bot")
 
 DEFAULT_TRADE_SIZE_USD = 3.0
 
-# BTC random-walk vol: ~0.12% per 5-min window (2% daily / sqrt(288 5m-bars))
-# 0.18% was too high, causing the model to underestimate certainty vs CLOB pricing
-_BTC_5M_VOL = 0.0012
-# Minimum BTC move from price_to_beat before we consider entering.
-# 0.08% ≈ $47 on $59k BTC — filters choppy noise, only enters on real moves.
-_MIN_BTC_DELTA = 0.0004
-# Minimum edge: implied_prob must exceed live token ask by at least this
-_MIN_EDGE = 0.04
-# Don't enter when the token is already above this — too late, small upside
-_MAX_TOKEN_ENTRY = 0.95
-# Enter on first qualifying scan — CLOB reprices within 10s so waiting for
-# a second scan eliminates the edge window. Accept more spike-reversal noise
-# in exchange for actually catching the edge before market makers close it.
-_MIN_CONSECUTIVE_SCANS = 1
-# Max new positions to open per 12s scan tick
-_MAX_ENTRIES_PER_SCAN = 2
+_BTC_5M_VOL = 0.0012     # BTC realized vol per 5m window (~0.12%)
+_MIN_BTC_DELTA = 0.0008  # 0.08% move (~$48 on $60k) before considering entry
+_MIN_EDGE = 0.06         # 6c minimum edge after CLOB ask — primary quality filter
+_MAX_TOKEN_ENTRY = 0.80  # allow up to 80c; edge check (_MIN_EDGE) does real filtering
+_MIN_CONSECUTIVE_SCANS = 1   # enter on first qualifying scan — CLOB lag is only 10-20s
+_MAX_ENTRIES_PER_SCAN = 1    # one entry per tick — don't pile in
 
-# slug -> BTC price at window open (from Coinbase prev-minute close at window start)
 _window_price_to_beat: dict[str, float] = {}
-# slugs where PTB was confirmed from a real kline (not fallback current_btc)
 _window_ptb_confirmed: set[str] = set()
-# slug -> (direction, consecutive_count) — momentum confirmation tracker
 _signal_streak: dict[str, tuple[str, int]] = {}
-# slugs where a stop was hit — don't re-enter this window
+
+# Persisted to disk so re-entry on stopped windows is blocked across restarts
+_STOPPED_SLUGS_PATH = os.path.join(os.path.dirname(__file__), "_data", "stopped_slugs.json")
 _stopped_slugs: set[str] = set()
 
-# slug -> position dict
 _open_positions: dict[str, dict] = {}
 
+
+def _load_stopped_slugs() -> None:
+    """Load stopped slugs from disk, pruning entries older than 24h."""
+    global _stopped_slugs
+    try:
+        if not os.path.exists(_STOPPED_SLUGS_PATH):
+            return
+        with open(_STOPPED_SLUGS_PATH) as f:
+            data = json.load(f)
+        cutoff = time.time() - 86400
+        _stopped_slugs = {slug for slug, ts in data.items() if ts > cutoff}
+    except Exception as e:
+        logger.debug(f"Could not load stopped_slugs: {e}")
+
+
+def _save_stopped_slug(slug: str) -> None:
+    """Persist a newly stopped slug so re-entry is blocked after restart."""
+    _stopped_slugs.add(slug)
+    try:
+        existing: dict = {}
+        if os.path.exists(_STOPPED_SLUGS_PATH):
+            with open(_STOPPED_SLUGS_PATH) as f:
+                existing = json.load(f)
+        existing[slug] = time.time()
+        with open(_STOPPED_SLUGS_PATH, "w") as f:
+            json.dump(existing, f)
+    except Exception as e:
+        logger.debug(f"Could not save stopped_slugs: {e}")
+
 _engine_running: bool = settings.CRYPTO_ENABLED
+
+_load_stopped_slugs()
 
 
 def is_engine_running() -> bool:
@@ -167,7 +188,10 @@ def _implied_prob(abs_delta_pct: float, time_remaining_s: float, window_s: float
     """
     if time_remaining_s <= 1:
         return 0.99 if abs_delta_pct > 0.001 else 0.5
-    vol_remaining = _BTC_5M_VOL * math.sqrt(time_remaining_s / window_s)
+    # vol scales with sqrt(time_remaining) relative to the 5m baseline — NOT relative to
+    # window_s. Using window_s caused 15m markets to use 5m vol (1.73x underestimate),
+    # making fair_prob 10-13c too high and creating phantom edge.
+    vol_remaining = _BTC_5M_VOL * math.sqrt(time_remaining_s / 300.0)
     if vol_remaining < 1e-7:
         return 0.99
     z = abs_delta_pct / vol_remaining
@@ -442,6 +466,25 @@ async def _try_entry(
         log_event("info", f"Crypto entry blocked ({market.slug}): R:R — {rr.reason}")
         return False
 
+    # AI gate: ask Claude whether this candle pattern supports the momentum signal
+    try:
+        from backend.crypto.ai_predictor import predict_direction
+        ai = await predict_direction(
+            slug=market.slug,
+            direction=direction,
+            btc_price=btc_price,
+            price_to_beat=_window_price_to_beat.get(market.slug, btc_price),
+            time_remaining_s=market.time_until_end,
+            fair_prob=fair_prob,
+            token_ask=entry_price,
+        )
+        if ai.skip_entry:
+            log_event("info", f"AI skipped {market.slug} {direction.upper()}: {ai.reasoning} (conf={ai.confidence:.2f})")
+            return False
+        log_event("info", f"AI confirmed {market.slug} {direction.upper()}: {ai.reasoning} (conf={ai.confidence:.2f})")
+    except Exception as ai_err:
+        logger.debug(f"AI gate error ({market.slug}): {ai_err} — proceeding without AI")
+
     ok, validate_reason = risk.validate_order(entry_price, DEFAULT_TRADE_SIZE_USD, token_price=entry_price)
     if not ok:
         return False
@@ -603,7 +646,7 @@ async def _execute_exit(slug: str, position: dict, decision, exit_price: float) 
         # After a stop-loss, block re-entry on this window — repeated entries
         # against a market that disagrees with our PTB just compounds losses.
         if decision.kind == "stop":
-            _stopped_slugs.add(slug)
+            _save_stopped_slug(slug)
 
     log_event(
         "trade",
@@ -732,13 +775,22 @@ async def settle_orphaned_trades() -> None:
         if not orphans:
             return
 
-        log_event("info", f"Startup: checking {len(orphans)} orphaned crypto scalp trades")
+        # Only settle orphans from the last 4 hours — older ones are history
+        # and making 50+ Gamma API calls on startup blocks the event loop.
+        cutoff_ts = now_ts - 4 * 3600
+        recent_orphans = [
+            t for t in orphans
+            if t.timestamp and t.timestamp.timestamp() > cutoff_ts
+        ]
+        if not recent_orphans:
+            return
+
+        log_event("info", f"Startup: checking {len(recent_orphans)} recent orphaned crypto scalp trades")
         settled_count = 0
 
-        for trade in orphans:
+        for trade in recent_orphans:
             try:
                 slug_ts = int(trade.event_slug.rsplit("-", 1)[-1])
-                # Determine window length from slug
                 win_min = 15 if "-15m-" in trade.event_slug else 5
                 window_end_ts = slug_ts + win_min * 60
             except (ValueError, IndexError):

@@ -94,21 +94,30 @@ async def resolve_link(link: str) -> Optional[ResolvedMarket]:
         # since an event often has several sub-markets (team A win / team B
         # win / draw) whose questions don't all name both teams.
         event_teams = extract_teams(ev.get("title", "") or "")
+        home_norm = normalize(event_teams[0]) if event_teams else ""
 
         markets = ev.get("markets", [])
         chosen_gm = None
         chosen_question = ""
+        home_market = None
+        first_non_draw = None
         for gm in markets:
             cid = gm.get("conditionId") or gm.get("condition_id", "")
             if not cid:
                 continue
             question = (gm.get("question", "") or gm.get("title", "")).lower()
-            if "draw" not in question:
-                chosen_gm = gm
-                chosen_question = gm.get("question", "") or gm.get("title", "")
+            if "draw" in question:
+                continue
+            if first_non_draw is None:
+                first_non_draw = gm
+            # Prefer the sub-market whose question mentions the home team
+            if home_norm and home_norm in question:
+                home_market = gm
                 break
+        chosen_gm = home_market or first_non_draw
         if chosen_gm is None and markets:
             chosen_gm = markets[0]
+        if chosen_gm is not None:
             chosen_question = chosen_gm.get("question", "") or chosen_gm.get("title", "")
 
         if chosen_gm is None:

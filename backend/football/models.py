@@ -43,6 +43,17 @@ class FootballReversionModel:
     DRIFT_FADE_THRESHOLD = 0.04
     DRIFT_MIN_MINUTE = 20
 
+    def update_drift_reference(self, fixture_id: int, price: float) -> None:
+        """Anchor drift reference to price after a confirmed goal/card/penalty.
+
+        Without this, a confirmed event (Japan scores → 0.115) leaves the
+        reference at 0.405, so when Brazil equalizes and wins (→ 0.975) the
+        drift model sees a 0.86 upward move from 0.115 and generates a SELL
+        signal on a locked outcome. Call this from _handle_slow_event after
+        every confirmed match event so the drift baseline stays current.
+        """
+        self._drift_reference[fixture_id] = price
+
     def check_drift(self, current: float, pre_match: float, minute: int, fixture_id: int | None = None) -> ModelUpdate:
         """Slow-path fade for sustained price drift with no goal/card/penalty event
         to explain it — distinct from update()'s event-driven reversion, which only
@@ -63,6 +74,13 @@ class FootballReversionModel:
         further move triggers another fade — persistent one-directional drift
         fades once and then goes quiet, instead of churning the whole match.
         """
+        # At min 85+, prices above 0.92 or below 0.08 reflect a nearly-locked
+        # outcome (one team winning with <5 min left). Fading these is wrong —
+        # the result won't revert to some mid-match equilibrium. Suppress drift
+        # detection entirely for these end-game extreme prices.
+        if minute >= 85 and (current > 0.92 or current < 0.08):
+            return ModelUpdate("NONE", current, 0.0)
+
         reference = self._drift_reference.get(fixture_id, pre_match) if fixture_id is not None else pre_match
         raw_move = current - reference
         if abs(raw_move) < self.DRIFT_FADE_THRESHOLD or minute < self.DRIFT_MIN_MINUTE:

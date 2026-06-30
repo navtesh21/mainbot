@@ -31,7 +31,7 @@ from backend.models.database import SessionLocal, FootballSession, Signal, Trade
 logger = logging.getLogger("trading_bot")
 
 # Ported from fball_bot/bot.py::_execute_signal's entry-gating constants.
-MIN_LIQUIDITY_USD = 20.0
+MIN_LIQUIDITY_USD = 5.0
 MIN_ENTRY_CONFIDENCE = 0.15
 DEFAULT_TRADE_SIZE_USD = 3.0  # RRGuard's trade_size input before Kelly sizing runs
 EXIT_POLL_SECONDS = 5
@@ -597,6 +597,14 @@ async def _handle_slow_event(session_id: int, event: MatchEvent) -> None:
     state.last_away_score = event.away_score
 
     price = await _fetch_current_price(state.condition_id)
+
+    # Anchor drift reference to post-event price so the drift model doesn't
+    # try to fade the next move from a stale pre-event reference. Without this,
+    # a Japan goal at 0.115 leaves reference=0.405, and when Brazil equalizes
+    # (→0.60) the drift check sees a 0.49 upward move and wrongly generates
+    # a SELL signal on a valid score-driven price change.
+    state.model.update_drift_reference(session_id, price)
+
     pre_match = state.model.get_baseline(session_id) or price
     update = state.model.update(current=price, event=event, pre_match=pre_match)
 
